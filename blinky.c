@@ -235,11 +235,11 @@ int main(void) {
                   //Limpa a flag de interrupção do ADC e obtém os dados do sequenciador
                   ADCIntClear(ADC0_BASE, 1);
                   ADCSequenceDataGet(ADC0_BASE, 1, ui32ADC0Value);
-                  dataVector[idx] = (uint16_t) ui32ADC0Value[0];  // Mantém apenas os 16 bits menos significativos
+                  dataVector[idx] =  ui32ADC0Value[0];  // Mantém apenas os 16 bits menos significativos
                   idx = (idx+1)%VECTOR_SIZE;
 
 
-                  if (flag == 1)
+                  if (flag == 1 && idx == 0)
                   {
                       Send_DMA();
                       flag = 0;
@@ -247,7 +247,7 @@ int main(void) {
               }
         if (!uDMAChannelIsEnabled(UDMA_CHANNEL_UART0TX)) {
             uDMAChannelTransferSet(UDMA_CHANNEL_UART0TX | UDMA_PRI_SELECT, UDMA_MODE_BASIC,
-                                       dataVector, (void *)(UART0_BASE + UART_O_DR), VECTOR_SIZE*sizeof(uint32_t));
+                                       dataVector, (void *)(UART0_BASE + UART_O_DR), VECTOR_SIZE*sizeof(uint16_t));
             uDMAChannelEnable(UDMA_CHANNEL_UART0TX);
 
         }
