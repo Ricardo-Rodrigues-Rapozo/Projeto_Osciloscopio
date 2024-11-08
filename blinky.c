@@ -1,46 +1,57 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "inc/tm4c1294ncpdt.h"
-#include "driverlib/sysctl.h"
-#include "driverlib/gpio.h"
-#include "driverlib/uart.h"
-#include "driverlib/pin_map.h"  // Necessário para configurar os pinos UART
 #include "inc/hw_memmap.h"
-#include "driverlib/adc.h"
 #include "inc/hw_types.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/interrupt.h"
+#include "driverlib/gpio.h"
 #include "driverlib/timer.h"
-#include "inc/hw_ints.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/uart.h"
+#include "driverlib/udma.h"
+#include "inc/hw_uart.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/adc.h"
+#include "driverlib/timer.h"
 #include "driverlib/interrupt.h"
 #include "driverlib/debug.h"
 #include "driverlib/pwm.h"
 #include "driverlib/fpu.h"
 
 
-//
-//--------------------------- PARAMETROS ---------------------------------------------------------------------
-//
+#if defined(ewarm)
+#pragma data_alignment=1024
+uint8_t pui8ControlTable[1024];
+#elif defined(ccs)
+#pragma DATA_ALIGN(pui8ControlTable, 1024)
+uint8_t pui8ControlTable[1024];
+#else
+uint8_t pui8ControlTable[1024] __attribute__ ((aligned(1024)));
+#endif
+
+
 
 #define PWM_FREQUENCY 100
 #define APP_PI 3.1415926535897932384626433832795f
 #define STEPS 256
 uint32_t ui32StoredPWM;
-#define SIZE_BUFFER 5000
-uint16_t  buffer[SIZE_BUFFER];
-volatile uint8_t flag = 0;
-uint16_t cont = 0;
-uint32_t FS = 40000; // Frequência de amostragem
-uint8_t SYNC_BYTE = 1;  // Sinal de sincronização esperado
-uint32_t ui32ADC0Value[1]; // Armazena valores do ADC
-uint16_t adcValue16;
-uint32_t control1 = 0; // variavel para debug
-uint32_t control2 = 0; // variavel para debug
-uint32_t ui32SysClkFreq;
 uint32_t timerLoad;
 volatile uint32_t ui32Load; // PWM period
 volatile uint32_t ui32BlueLevel; // PWM duty cycle for blue LED
 volatile uint32_t ui32PWMClock; // PWM clock frequency
 volatile uint32_t ui32Index; // Counts the calculation loops
 float fAngle; // Value for sine math (radians)
+// Tamanho do vetor e declaração do vetor de 16 bits
+#define VECTOR_SIZE 200
+uint16_t dataVector[VECTOR_SIZE];
+uint32_t ui32SysClkFreq;
+uint32_t FS = 40000;
+uint8_t SYNC_BYTE = 1;  // Sinal de sincronização esperado
+uint32_t ui32ADC0Value[1]; // Armazena valores do ADC
+volatile uint8_t flag = 0;
+int idx = 0;
+uint16_t control1 = 0;
 
 
 //
@@ -73,16 +84,13 @@ void InitPWM(void)
 
 }
 
-//
-//--------------------Interrupção para RX UART ----------------------------------------------------------------
-//
 
 void UARTIntHandler(void)
 {
     uint32_t ui32Status;
+    control1 = 10;
     ui32Status = UARTIntStatus(UART0_BASE, true); //get interrupt status
     UARTIntClear(UART0_BASE, ui32Status); //clear the asserted interrupts
-    control1 = 10;
     while(UARTCharsAvail(UART0_BASE)) //loop while there are chars
     {
         if(UARTCharGetNonBlocking(UART0_BASE) == SYNC_BYTE)
@@ -92,155 +100,156 @@ void UARTIntHandler(void)
     }
 }
 
-//
-//-------------------------- Inicialização do UART --------------------------------------------------------------------------
-//
-void UARTInit(void) {
-//
-//--------------------Enable the UART peripheral ---------------------------------------------------------------------------------------------
-//
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
-    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-//
-//--------------------Set the Rx/Tx pins as UART pins ----------------------------------------------------------------
-//
-    GPIOPinConfigure(GPIO_PA0_U0RX);
-    GPIOPinConfigure(GPIO_PA1_U0TX);
-    GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1);
-//
-//-------------------- Configure the UART baud rate, data configuration ----------------------------------------------------------------
-//
-    UARTConfigSetExpClk(UART0_BASE, ui32SysClkFreq, 115200,(UART_CONFIG_WLEN_8 |
-                        UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE));
+// Função de inicialização do UART
+void UART_Init(void) {
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
+        SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
 
-//
-//-------------------- Configure the Interrupt ----------------------------------------------------------------
-//
-    IntMasterEnable();
-    IntEnable(INT_UART0);
-    UARTIntEnable( UART0_BASE , UART_INT_RX | UART_INT_RT);
+        GPIOPinConfigure(GPIO_PA0_U0RX);
+        GPIOPinConfigure(GPIO_PA1_U0TX);
+        GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1);
 
-//
-//-------------------- Enable UART ----------------------------------------------------------------
-//
-    //UARTEnable(UART0_BASE);
+        UARTConfigSetExpClk(UART0_BASE, ui32SysClkFreq, 115200,(UART_CONFIG_WLEN_8 | UART_CONFIG_STOP_ONE | UART_CONFIG_PAR_NONE));
+
+        UARTFIFOLevelSet(UART0_BASE, UART_FIFO_TX4_8, UART_FIFO_RX4_8);
+
+        UARTEnable(UART0_BASE);
+
+        UARTDMAEnable(UART0_BASE, UART_DMA_TX);
+        // ------------------ Habilitar interrupções UART ------------------
+
+            // Registra a função de interrupção UARTIntHandler como a função que será chamada quando uma interrupção ocorrer
+            UARTIntRegister(UART0_BASE, UARTIntHandler);
+
+            // Habilitar as interrupções para eventos de recepção (RX) e timeout de recepção (RT)
+            UARTIntEnable(UART0_BASE, UART_INT_RX | UART_INT_RT);
+
+            // Habilitar a interrupção UART0 no NVIC (controlador de interrupções do microcontrolador)
+            IntEnable(INT_UART0);
+
+            // Habilitar interrupções globais no sistema (caso ainda não estejam habilitadas)
+            IntMasterEnable();
 }
 
-//
-//------------------------- Função para enviar dados via UART -------------------------------------------
-//
-void sendINT32(uint16_t* buffer) {// Função para enviar 4 bytes via UART
-    uint_fast16_t i;
-    char* ptr = (char*)buffer;
-    for ( i = 0; i < SIZE_BUFFER*sizeof(uint16_t) ; i++)
-    {
-        UARTCharPut(UART0_BASE, ptr[i]);  // Envia cada byte
-    }
+// Função de inicialização do uDMA
+void uDMA_Init(void) {
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_UDMA);
+    uDMAEnable();
+    uDMAControlBaseSet(pui8ControlTable);
+}
+
+// Configura o canal uDMA para transferência de dados
+void configure_uDMAChannel(void) {
+    uDMAChannelAssign(UDMA_CHANNEL_UART0TX);
+    uDMAChannelAttributeDisable(UDMA_CHANNEL_UART0TX,
+                                        UDMA_ATTR_ALTSELECT |
+                                        UDMA_ATTR_HIGH_PRIORITY |
+                                        UDMA_ATTR_REQMASK);
+
+    uDMAChannelAttributeEnable(UDMA_CHANNEL_UART0TX, UDMA_ATTR_USEBURST);
+
+    uDMAChannelControlSet(UDMA_CHANNEL_UART0TX | UDMA_PRI_SELECT,
+                          UDMA_SIZE_8 | UDMA_SRC_INC_8 | UDMA_DST_INC_NONE | UDMA_ARB_8);
+
+    uDMAChannelTransferSet(UDMA_CHANNEL_UART0TX | UDMA_PRI_SELECT, UDMA_MODE_BASIC,
+                           dataVector, (void *)(UART0_BASE + UART_O_DR), VECTOR_SIZE*sizeof(uint32_t));
+
+
 }
 
 
-
-//
-//---------------------------------- INICIALIZAÇAO DO ADC ----------------------------------------------------------
-//
-void InitADC(void)
-    {
-//
-//---------------- Habilita o ADC, GPIO E e o Timer0 -----------------------------------------------------------
-//
-           SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0); // habilita o ADC0
-           SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE); //  habilita a porta E GPIO
-           SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0); // habilita o timer 0
-//
-//---------- Aguarda até que os periféricos estejam prontos ----------------------------------------------------------------------
-//
-           while(!SysCtlPeripheralReady(SYSCTL_PERIPH_ADC0));
-           while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOE));
-           while(!SysCtlPeripheralReady(SYSCTL_PERIPH_TIMER0));
-
-//
-//--------- Configura o pino PE3 como entrada analógica (AIN0)---------------------------------------
-//
-           GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3);
-
-//
-//----------Configura o Timer0 para gerar um trigger periódico para o ADC ----------------------------------------
-//
-
-           TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
-           timerLoad = (SysCtlClockGet() / FS) - 1; // Configura para uma taxa de FS kHz
-           TimerLoadSet(TIMER0_BASE, TIMER_A, timerLoad);
-           TimerControlTrigger(TIMER0_BASE, TIMER_A, true); // Permite que o Timer dispare o ADC
-           TimerEnable(TIMER0_BASE, TIMER_A);
-
-//
-// -------------------------- Configurações do ADC -------------------------------------------------------
-// Configura o Sequenciador 1 para usar o Timer0 como trigger
-           ADCSequenceConfigure(ADC0_BASE, 1, ADC_TRIGGER_TIMER, 0);
-
-//
-//-------- Configura as etapas do sequenciador para ler o sinal de AIN0 (PE3) -----------------------------------
-//
-           ADCSequenceStepConfigure(ADC0_BASE, 1, 0, ADC_CTL_CH0 | ADC_CTL_IE | ADC_CTL_END);
-
-//
-//--------------Habilita o Sequenciador 1 e limpa qualquer interrupção pendente --------------------------------------
-//
-
-           ADCSequenceEnable(ADC0_BASE, 1);
-           ADCIntClear(ADC0_BASE, 1);
-    }
-
-
-int main(void)
+void ConfigureADC(void)
 {
-    int idx=0;
-//
-// -------------------------- Configurações de clock e periféricos -------------------------------------------------------
-// Configura o clock do sistema para 120 MHz
 
-    ui32SysClkFreq = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480), 120000000);
-//
-// -------------------------- Inicialização da UART  ----------------------------------------------------------------------
-//
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_TIMER0));
 
-    UARTInit();
+    TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
 
-//
-// -------------------------- Inicialização do ADC ----------------------------------------------------------------------
-//
-    InitADC();
+    TimerLoadSet(TIMER0_BASE, TIMER_A, ui32SysClkFreq/FS - 1);
 
-//
-// -------------------------- Inicialização do PWM ----------------------------------------------------------------------
-//
+    TimerControlTrigger(TIMER0_BASE, TIMER_A, true);
+
+    TimerEnable(TIMER0_BASE, TIMER_A);
+
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_ADC0));
+
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOE));
+
+    GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_3);
+
+    ADCSequenceConfigure(ADC0_BASE, 1, ADC_TRIGGER_TIMER, 0);
+
+    ADCSequenceStepConfigure(ADC0_BASE, 1, 3, ADC_CTL_CH0 | ADC_CTL_IE | ADC_CTL_END);
+
+    ADCSequenceEnable(ADC0_BASE, 1);
+
+    ADCIntClear(ADC0_BASE, 1);
+
+
+}
+
+void Send_DMA(void)
+{
+
+    uDMAChannelTransferSet(UDMA_CHANNEL_UART0TX | UDMA_PRI_SELECT,
+                           UDMA_MODE_BASIC, dataVector,
+                           (void *)(UART0_BASE + UART_O_DR), VECTOR_SIZE * sizeof(uint32_t));
+
+    uDMAChannelEnable(UDMA_CHANNEL_UART0TX);
+    control1 = 20;
+
+}
+
+// Função principal
+int main(void) {
+    // Configuração do clock do sistema
+    ui32SysClkFreq = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ |
+        SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480), 120000000);
+
+    // Inicialização do UART e uDMA
+    ConfigureADC();
+    UART_Init();
+    uDMA_Init();
+    configure_uDMAChannel();
+
 
     InitPWM();
     ui32StoredPWM = ui32Load/2; // 1% de ciclo de trabalho
     PWMPulseWidthSet(PWM0_BASE, PWM_OUT_4, ui32StoredPWM);
-// -------------------------- Loop Principal ------------------------------------------------------------------
-//
 
-    while(1)
-    {
+    // Ativa a transferência uDMA
+    uDMAChannelEnable(UDMA_CHANNEL_UART0TX);
 
-        //SysCtlDelay(ui32SysClkFreq/(STEPS));
+
+
+    // Loop infinito para manter o programa em execução
+    while (1) {
+        // Verificar e reiniciar a transferência se necessário
+
         // Espera até a conversão do ADC estar completa
-        if (ADCIntStatus(ADC0_BASE, 1, false))
-        {
-            //Limpa a flag de interrupção do ADC e obtém os dados do sequenciador
-            ADCIntClear(ADC0_BASE, 1);
-            ADCSequenceDataGet(ADC0_BASE, 1, ui32ADC0Value);
-            control2 = 2;
-            buffer[idx] = (uint16_t) (ui32ADC0Value[0] & 0xFFFF);  // Mantém apenas os 16 bits menos significativos
-            idx = (idx+1)%SIZE_BUFFER;
+              if (ADCIntStatus(ADC0_BASE, 1, false))
+              {
+                  //Limpa a flag de interrupção do ADC e obtém os dados do sequenciador
+                  ADCIntClear(ADC0_BASE, 1);
+                  ADCSequenceDataGet(ADC0_BASE, 1, ui32ADC0Value);
+                  dataVector[idx] = (uint16_t) ui32ADC0Value[0];  // Mantém apenas os 16 bits menos significativos
+                  idx = (idx+1)%VECTOR_SIZE;
 
-            if (flag == 1)
-            {
-                control2 = 10;
-                sendINT32(buffer);
-                flag = 0;
-            }
+
+                  if (flag == 1)
+                  {
+                      Send_DMA();
+                      flag = 0;
+                  }
+              }
+        if (!uDMAChannelIsEnabled(UDMA_CHANNEL_UART0TX)) {
+            uDMAChannelTransferSet(UDMA_CHANNEL_UART0TX | UDMA_PRI_SELECT, UDMA_MODE_BASIC,
+                                       dataVector, (void *)(UART0_BASE + UART_O_DR), VECTOR_SIZE*sizeof(uint32_t));
+            uDMAChannelEnable(UDMA_CHANNEL_UART0TX);
+
         }
     }
 }
