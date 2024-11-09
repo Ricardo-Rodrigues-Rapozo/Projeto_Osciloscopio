@@ -11,7 +11,7 @@ def send_sync_signal():
     time.sleep(0.1)  # Espera 1 segundo antes de enviar o próximo sinal
 
 # Configura a porta serial  
-ser = serial.Serial('COM3', 115200, timeout=None)
+ser = serial.Serial('COM5', 115200, timeout=None)
 ser.flush() ## limpa dados pendentes na porta serial 
 time.sleep(1)  # Espera a conexão ser estabelecida
 
@@ -25,9 +25,12 @@ vect = np.zeros(BUFFER_SIZE, dtype=np.uint16)
 
 
 while True:    
+    #ser.flush() ## limpa dados pendentes na porta serial 
     send_sync_signal()
 
-    if ser.in_waiting > (2*BUFFER_SIZE-1):
+    ser.flush()
+    while ser.in_waiting > (2*BUFFER_SIZE-1):
+
         data = np.frombuffer(ser.read(BUFFER_SIZE*2),dtype=np.uint16)*3.3/4095
         # Calcula a FFT do vetor
         #fft_result = np.fft.fft(data[BUFFER_SIZE*0.01:BUFFER_SIZE*0,9])
@@ -45,7 +48,7 @@ while True:
         fft_magnitude = np.abs(fft_result)
 
         # Filtra as frequências positivas
-        idx = np.where(frequencies > 0)
+        idx = np.where(frequencies >= 0)
         freq_filtered = frequencies[idx]
         fft_magnitude_filtered = fft_magnitude[idx]
 
